@@ -1,3 +1,0 @@
-import random, inspect
-print("random file:", getattr(random, "__file__", "<builtin>"))
-print("shuffle signature:", inspect.signature(random.shuffle))
