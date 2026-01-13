@@ -1,71 +1,73 @@
-# episode_stats_wrapper.py
 from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List
+
 import gymnasium as gym
 
 
+@dataclass
+class _EpisodeTracker:
+    ep_return: float = 0.0
+    episodes_seen: int = 0
+    action_counts: List[int] = field(default_factory=list)
+    action_total_steps: int = 0
+
+
 class EpisodeStatsWrapper(gym.Wrapper):
-    def __init__(self, env, replay_every_ep: int = 350, max_replays: int = 10):
+    """
+    Tracks per-episode return and action distribution.
+
+    On episode end, adds `info["episode_extra"]` with return/score/win and action stats.
+    """
+
+    def __init__(self, env: gym.Env, num_action_types: int):
         super().__init__(env)
-        self.replay_every_ep = int(replay_every_ep)
-        self.max_replays = int(max_replays)
-
-        self.episodes_seen = 0
-        self.replays_saved = 0
-
-        self.reset_episode_stats()
-
-    def reset_episode_stats(self):
-        self.ep_return = 0.0
-        self.ep_len = 0
-        self.last_score_total = 0
-        self.last_zerglings_left = None
-        self.last_win = 0  # keep as 0 unless proven win=1
+        self.num_action_types = int(num_action_types)
+        self._tracker = _EpisodeTracker(action_counts=[0] * self.num_action_types)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self.reset_episode_stats()
+        self._tracker.ep_return = 0.0
+        self._tracker.action_counts = [0] * self.num_action_types
+        self._tracker.action_total_steps = 0
         return obs, info
 
-    def save_replay(self):
-        if hasattr(self.env, "save_replay"):
-            return self.env.save_replay()
-        return None
-
     def step(self, action):
+        try:
+            a0 = int(action[0])
+            if 0 <= a0 < self.num_action_types:
+                self._tracker.action_counts[a0] += 1
+        except Exception:
+            pass
+        self._tracker.action_total_steps += 1
+
         obs, reward, terminated, truncated, info = self.env.step(action)
-
-        self.ep_return += float(reward)
-        self.ep_len += 1
-
-        if "score_total" in info:
-            self.last_score_total = int(info["score_total"])
-        if "zerglings_left" in info:
-            self.last_zerglings_left = info["zerglings_left"]
-        if "win" in info and info["win"] is not None:
-            self.last_win = int(info["win"])
+        self._tracker.ep_return += float(reward)
 
         done = bool(terminated or truncated)
         if done:
-            self.episodes_seen += 1
+            self._tracker.episodes_seen += 1
+
+            score_total = float(info.get("score_total", 0.0))
+            win = info.get("win", None)
+            try:
+                win_int = int(win) if win is not None else 0
+            except Exception:
+                win_int = 0
+
+            total = max(int(self._tracker.action_total_steps), 1)
+            pcts = [c / total for c in self._tracker.action_counts]
 
             info = dict(info)
             info["episode_extra"] = {
-                "ep_return": self.ep_return,
-                "ep_len": self.ep_len,
-                "score_total": self.last_score_total,
-                "zerglings_left": self.last_zerglings_left,
-                "win": self.last_win,
-                "episodes_seen": self.episodes_seen,
-                "last_win": self.last_win,
+                "ep_return": float(self._tracker.ep_return),
+                "episodes_seen": int(self._tracker.episodes_seen),
+                "score_total": score_total,
+                "win": win_int,
+                "action_total_steps": total,
+                "action_counts": list(self._tracker.action_counts),
+                "action_pcts": list(pcts),
             }
-
-            should_save = (
-                self.replays_saved < self.max_replays
-                and self.replay_every_ep > 0
-                and (self.episodes_seen % self.replay_every_ep == 0)
-            )
-            info["save_replay"] = bool(should_save)
-            if should_save:
-                self.replays_saved += 1
 
         return obs, reward, terminated, truncated, info
