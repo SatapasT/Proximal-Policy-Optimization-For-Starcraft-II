@@ -1,7 +1,32 @@
+# PPO checkpoints & models
+checkpoints/
+**/checkpoints/
+
+# TensorBoard logs
+tb_logs/
+**/tb_logs/
+
+# StarCraft II replays
+sc2_replays/
+**/sc2_replays/
+*.SC2Replay
+
+# PySC2 temp / runtime files
+pysc2_rank*/
+pysc2_*/
+SC2Temp/
+SC2Cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[codz]
-*$py.class
+**/__pycache__/
+*.py[cod]
+runs/
+outputs/
+logs/
+*.log
+.DS_Store
+Thumbs.db
 
 # C extensions
 *.so
