@@ -10,7 +10,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
 
-from .sc2_gym import FindAndDefeatZerglingsGym
+from .sc2_gym import DefeatRoachesGym
 from common.metrics import EpisodeStatsWrapper, PrintEpisodeExtrasCallback
 
 from absl import flags as absl_flags
@@ -40,7 +40,6 @@ def is_windows() -> bool:
 
 
 def linear_schedule(initial_value: float):
-    """SB3 schedule: progress_remaining goes 1 -> 0."""
     initial_value = float(initial_value)
 
     def func(progress_remaining: float) -> float:
@@ -50,8 +49,8 @@ def linear_schedule(initial_value: float):
 
 
 def build_action_names() -> list[str]:
-    tmp_env = FindAndDefeatZerglingsGym(
-        map_name="FindAndDefeatZerglings",
+    tmp_env = DefeatRoachesGym(
+        map_name="DefeatRoaches",
         grid_n=8,
         step_mul=8,
         visualize=False,
@@ -78,12 +77,6 @@ def resolve_run_dir(load_path: str | None) -> Path:
 
 
 def make_env_fn(rank: int, seed: int, run_dir: Path):
-    """Env factory for VecEnv workers.
-
-    On Windows (spawn), each worker uses its own TEMP directory to avoid SC2
-    temp-file collisions.
-    """
-
     def _init():
         ensure_absl_flags_parsed_for_subproc()
 
@@ -94,8 +87,8 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
         os.environ["TEMP"] = str(worker_tmp)
         os.environ["TMPDIR"] = str(worker_tmp)
 
-        env = FindAndDefeatZerglingsGym(
-            map_name="FindAndDefeatZerglings",
+        env = DefeatRoachesGym(
+            map_name="DefeatRoaches",
             grid_n=8,
             step_mul=8,
             visualize=False,
@@ -105,7 +98,7 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
         env = EpisodeStatsWrapper(
             env,
             num_action_types=len(env.action_type_names),
-            kill_keys=["zerglings_killed"],   # <-- only this
+            kill_keys=[],
         )
         return env
 
@@ -147,17 +140,20 @@ if __name__ == "__main__":
         env = VecNormalize(env, norm_obs=False, norm_reward=True, clip_reward=10.0)
 
     action_names = build_action_names()
+
     callback = PrintEpisodeExtrasCallback(
         action_type_names=action_names,
-        print_every=20,          
+        print_every=20,
         log_dir=RUN_DIR,
         save_every_episodes=SAVE_EVERY_EPISODES,
         save_dir=RUN_DIR,
         verbose=1,
-        log_episode_json_every=1,    
-        write_summary_json=True,
         print_summary=True,
+        write_summary_json=True,
+        log_episode_json_every=1,
+        win_rate_window=50, 
     )
+
 
     rollout_size = N_STEPS * N_ENVS
     batch_size = 256
@@ -167,8 +163,9 @@ if __name__ == "__main__":
     lr = linear_schedule(2.5e-4)
 
     if load_path:
-        print(f"[RESUME] Loading model from: {load_path}")
+        print(f"[RESUME/TRANSFER] Loading model from: {load_path}")
         model = PPO.load(load_path, env=env, device="cuda", print_system_info=True)
+
         if use_vecnorm_reward and vecnorm_path.exists():
             env = VecNormalize.load(str(vecnorm_path), env)
             env.training = True

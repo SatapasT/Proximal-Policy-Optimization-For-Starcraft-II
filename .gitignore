@@ -5,6 +5,8 @@ checkpoints/
 # TensorBoard logs
 tb_logs/
 **/tb_logs/
+events.out.tfevents.*
+**/events.out.tfevents.*
 
 # StarCraft II replays
 sc2_replays/
@@ -22,6 +24,7 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 runs/
+**/runs/
 outputs/
 logs/
 *.log
@@ -213,6 +216,11 @@ cython_debug/
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
+# Editor settings
+.vscode/
+.idea/
+*.code-workspace
+
 # Ruff stuff:
 .ruff_cache/
 
@@ -234,3 +242,17 @@ __marimo__/
 # Ignore Python virtual environments
 .venv310/
 venv/
+
+# Training outputs (SB3 / PPO)
+sb3_progress.log
+**/sb3_progress.log
+train_log_*.txt
+**/train_log_*.txt
+log.txt
+**/log.txt
+ppo_*.zip
+**/ppo_*.zip
+
+# Experiment trackers
+wandb/
+**/wandb/

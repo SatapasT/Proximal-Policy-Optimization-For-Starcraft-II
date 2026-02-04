@@ -1,4 +1,5 @@
-# sc2Agent.py
+"""Minimal PySC2 debug agent that prints observation details."""
+
 import numpy as np
 
 from pysc2.env import sc2_env, run_loop
@@ -7,13 +8,10 @@ from pysc2.lib import actions, features
 
 from absl import app
 
-
-
-# Make numpy prints a bit nicer in the console
 np.set_printoptions(
     linewidth=120,
     suppress=True,
-    threshold=50  # don't print massive arrays fully
+    threshold=50 
 )
 
 
@@ -21,12 +19,10 @@ class DebugAgent(base_agent.BaseAgent):
     """Agent that just prints out stuff about the observation and does no-op."""
 
     def step(self, timestep):
-        # Keep BaseAgent bookkeeping (steps, reward, episodes, etc.)
         super().step(timestep)
 
         obs = timestep.observation
 
-        # Only spam a little: first episode, first few steps
         if self.episodes == 1 and self.steps <= 5:
             print("\n" + "=" * 80)
             print(f"EPISODE {self.episodes}  STEP {self.steps}")
@@ -37,10 +33,7 @@ class DebugAgent(base_agent.BaseAgent):
             self.print_available_actions(obs)
             self.print_units_info(obs)
 
-        # Agent does nothing – pure no-op
         return actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])
-
-    # ----------------- helper print functions -----------------
 
     def print_basic_info(self, timestep):
         print("\n[Basic timestep info]")
@@ -52,7 +45,7 @@ class DebugAgent(base_agent.BaseAgent):
 
         if "player" in o:
             print("\n[player]")
-            print(o["player"])  # minerals, vespene, supply, etc.
+            print(o["player"])
 
         if "score_cumulative" in o:
             print("\n[score_cumulative]")
@@ -69,7 +62,6 @@ class DebugAgent(base_agent.BaseAgent):
             screen = o["feature_screen"]
             print(f"screen  shape: {screen.shape}, dtype={screen.dtype}")
 
-        # Show what each minimap / screen layer represents
         print("\n[Minimap feature definitions]")
         for i, f in enumerate(features.MINIMAP_FEATURES):
             print(f"  index {i:2d}: {f.name:20s} (type={f.type})")
@@ -85,7 +77,7 @@ class DebugAgent(base_agent.BaseAgent):
         print("IDs:", avail)
 
         print("\n[Decoded action names + args]")
-        for a_id in avail[:20]:  # don’t spam everything
+        for a_id in avail[:20]:
             fn = actions.FUNCTIONS[a_id]
             arg_desc = ", ".join([f"{a.name}:{a.sizes}" for a in fn.args])
             print(f"  {a_id:3d}: {fn.name:30s} ({arg_desc})")
@@ -107,10 +99,7 @@ class DebugAgent(base_agent.BaseAgent):
 
 
 def main(argv):
-    # argv is required by absl.app; we don't need it.
     del argv
-
-    # Simple “minimap playground” on a DeepMind minigame
     agent = DebugAgent()
 
     interface_format = features.AgentInterfaceFormat(

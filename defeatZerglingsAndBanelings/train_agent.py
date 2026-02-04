@@ -10,7 +10,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
 
-from .sc2_gym import FindAndDefeatZerglingsGym
+from .sc2_gym import DefeatZerglingsAndBanelingsGym
 from common.metrics import EpisodeStatsWrapper, PrintEpisodeExtrasCallback
 
 from absl import flags as absl_flags
@@ -23,7 +23,7 @@ def ensure_absl_flags_parsed_for_subproc() -> None:
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("load_path", None, "Optional path to a saved SB3 PPO model (.zip).")
+flags.DEFINE_string("load_path", None, "Optional path to a saved SB3 PPO model (.zip) for resume/transfer.")
 flags.DEFINE_integer("chunk_timesteps", 200_000, "Timesteps per training chunk.")
 flags.DEFINE_integer("n_envs", 8, "Parallel envs.")
 flags.DEFINE_integer("n_steps", 256, "Per-env rollout steps.")
@@ -40,7 +40,6 @@ def is_windows() -> bool:
 
 
 def linear_schedule(initial_value: float):
-    """SB3 schedule: progress_remaining goes 1 -> 0."""
     initial_value = float(initial_value)
 
     def func(progress_remaining: float) -> float:
@@ -50,8 +49,8 @@ def linear_schedule(initial_value: float):
 
 
 def build_action_names() -> list[str]:
-    tmp_env = FindAndDefeatZerglingsGym(
-        map_name="FindAndDefeatZerglings",
+    tmp_env = DefeatZerglingsAndBanelingsGym(
+        map_name="DefeatZerglingsAndBanelings",
         grid_n=8,
         step_mul=8,
         visualize=False,
@@ -78,24 +77,18 @@ def resolve_run_dir(load_path: str | None) -> Path:
 
 
 def make_env_fn(rank: int, seed: int, run_dir: Path):
-    """Env factory for VecEnv workers.
-
-    On Windows (spawn), each worker uses its own TEMP directory to avoid SC2
-    temp-file collisions.
-    """
-
     def _init():
         ensure_absl_flags_parsed_for_subproc()
 
+        # avoid SC2 temp collisions on Windows/spawn
         worker_tmp = (run_dir / "sc2_tmp" / f"rank_{rank}").resolve()
         worker_tmp.mkdir(parents=True, exist_ok=True)
-
         os.environ["TMP"] = str(worker_tmp)
         os.environ["TEMP"] = str(worker_tmp)
         os.environ["TMPDIR"] = str(worker_tmp)
 
-        env = FindAndDefeatZerglingsGym(
-            map_name="FindAndDefeatZerglings",
+        env = DefeatZerglingsAndBanelingsGym(
+            map_name="DefeatZerglingsAndBanelings",
             grid_n=8,
             step_mul=8,
             visualize=False,
@@ -105,7 +98,7 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
         env = EpisodeStatsWrapper(
             env,
             num_action_types=len(env.action_type_names),
-            kill_keys=["zerglings_killed"],   # <-- only this
+            kill_keys=["zerglings_killed", "banelings_killed"],  # killed_total will sum these
         )
         return env
 
@@ -147,16 +140,17 @@ if __name__ == "__main__":
         env = VecNormalize(env, norm_obs=False, norm_reward=True, clip_reward=10.0)
 
     action_names = build_action_names()
+
     callback = PrintEpisodeExtrasCallback(
         action_type_names=action_names,
-        print_every=20,          
+        print_every=20,            
         log_dir=RUN_DIR,
         save_every_episodes=SAVE_EVERY_EPISODES,
         save_dir=RUN_DIR,
         verbose=1,
-        log_episode_json_every=1,    
-        write_summary_json=True,
         print_summary=True,
+        write_summary_json=True,
+        log_episode_json_every=1,
     )
 
     rollout_size = N_STEPS * N_ENVS
@@ -167,8 +161,10 @@ if __name__ == "__main__":
     lr = linear_schedule(2.5e-4)
 
     if load_path:
-        print(f"[RESUME] Loading model from: {load_path}")
+        print(f"[RESUME/TRANSFER] Loading model from: {load_path}")
         model = PPO.load(load_path, env=env, device="cuda", print_system_info=True)
+
+        # same logic as your roaches script: only loads vecnorm if this run_dir has it
         if use_vecnorm_reward and vecnorm_path.exists():
             env = VecNormalize.load(str(vecnorm_path), env)
             env.training = True
