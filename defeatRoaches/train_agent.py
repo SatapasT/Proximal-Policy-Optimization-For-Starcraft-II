@@ -6,7 +6,9 @@ from datetime import datetime
 import torch
 from absl import flags
 
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers import ActionMasker
+
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
 
@@ -23,7 +25,7 @@ def ensure_absl_flags_parsed_for_subproc() -> None:
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("load_path", None, "Optional path to a saved SB3 PPO model (.zip).")
+flags.DEFINE_string("load_path", None, "Optional path to a saved SB3 model (.zip).")
 flags.DEFINE_integer("chunk_timesteps", 200_000, "Timesteps per training chunk.")
 flags.DEFINE_integer("n_envs", 8, "Parallel envs.")
 flags.DEFINE_integer("n_steps", 256, "Per-env rollout steps.")
@@ -49,12 +51,7 @@ def linear_schedule(initial_value: float):
 
 
 def build_action_names() -> list[str]:
-    tmp_env = DefeatRoachesGym(
-        map_name="DefeatRoaches",
-        grid_n=8,
-        step_mul=8,
-        visualize=False,
-    )
+    tmp_env = DefeatRoachesGym(map_name="DefeatRoaches", grid_n=8, step_mul=8, visualize=False)
     names = list(tmp_env.action_type_names)
     tmp_env.close()
     return names
@@ -76,6 +73,22 @@ def resolve_run_dir(load_path: str | None) -> Path:
     return run_dir
 
 
+def get_action_mask(env):
+    """
+    Robust mask getter:
+    - works if env is wrapped (ActionMasker / Monitor / EpisodeStatsWrapper etc.)
+    - expects BaseSC2Gym implements action_masks()
+    """
+    cur = env
+    while hasattr(cur, "env"):
+        if hasattr(cur, "action_masks"):
+            return cur.action_masks()
+        cur = cur.env
+    if hasattr(cur, "action_masks"):
+        return cur.action_masks()
+    raise AttributeError("Could not find action_masks() on env or any inner env.")
+
+
 def make_env_fn(rank: int, seed: int, run_dir: Path):
     def _init():
         ensure_absl_flags_parsed_for_subproc()
@@ -87,19 +100,19 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
         os.environ["TEMP"] = str(worker_tmp)
         os.environ["TMPDIR"] = str(worker_tmp)
 
-        env = DefeatRoachesGym(
-            map_name="DefeatRoaches",
-            grid_n=8,
-            step_mul=8,
-            visualize=False,
-        )
-
+        env = DefeatRoachesGym(map_name="DefeatRoaches", grid_n=8, step_mul=8, visualize=False)
         env.reset(seed=seed + rank)
+
+        # IMPORTANT: wrap stats BEFORE ActionMasker so stats can access custom fields
         env = EpisodeStatsWrapper(
             env,
             num_action_types=len(env.action_type_names),
             kill_keys=[],
         )
+
+        # MaskablePPO expects the outer env to be ActionMasker (or expose masks)
+        env = ActionMasker(env, get_action_mask)
+
         return env
 
     return _init
@@ -151,9 +164,8 @@ if __name__ == "__main__":
         print_summary=True,
         write_summary_json=True,
         log_episode_json_every=1,
-        win_rate_window=50, 
+        win_rate_window=None,
     )
-
 
     rollout_size = N_STEPS * N_ENVS
     batch_size = 256
@@ -164,7 +176,7 @@ if __name__ == "__main__":
 
     if load_path:
         print(f"[RESUME/TRANSFER] Loading model from: {load_path}")
-        model = PPO.load(load_path, env=env, device="cuda", print_system_info=True)
+        model = MaskablePPO.load(load_path, env=env, device="cuda", print_system_info=True)
 
         if use_vecnorm_reward and vecnorm_path.exists():
             env = VecNormalize.load(str(vecnorm_path), env)
@@ -173,7 +185,7 @@ if __name__ == "__main__":
             model.set_env(env)
     else:
         print("[START] Training from scratch.")
-        model = PPO(
+        model = MaskablePPO(
             "CnnPolicy",
             env,
             verbose=1,
@@ -208,7 +220,9 @@ if __name__ == "__main__":
                 env.save(str(vecnorm_path))
     except KeyboardInterrupt:
         ep = getattr(callback, "ep", None)
-        interrupt_path = RUN_DIR / (f"ppo_interrupt_ep{ep:06d}" if isinstance(ep, int) else "ppo_interrupt")
+        interrupt_path = RUN_DIR / (
+            f"maskableppo_interrupt_ep{ep:06d}" if isinstance(ep, int) else "maskableppo_interrupt"
+        )
         print("\n[INTERRUPT] Saving model...")
         model.save(str(interrupt_path))
         print(f"[INTERRUPT] Saved -> {interrupt_path}.zip")

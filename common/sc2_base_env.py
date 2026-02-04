@@ -9,9 +9,9 @@ from pysc2.lib import actions, features
 class BaseSC2Gym(gym.Env):
     metadata = {"render_modes": []}
 
-    # NOTE: select_army removed, select_own_unit added
     ACTION_TYPE_NAMES = [
         "no_op",
+        "select_army",          # <-- ADDED
         "select_own_unit",
         "select_point",
         "select_rect",
@@ -34,6 +34,12 @@ class BaseSC2Gym(gym.Env):
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
         players=None,
+        # --- shaping knobs (safe defaults) ---
+        time_penalty: float = 0.001,          # per-step penalty to encourage faster completion
+        kill_bonus: float = 0.25,             # per enemy unit removed since last step
+        own_loss_penalty: float = 0.5,        # per own unit removed since last step
+        repeat_action_penalty: float = 0.002, # mild anti-spam
+        select_army_penalty: float = 0.002,   # <-- ADDED: discourage select_army spam (tiny)
     ):
         super().__init__()
         self.map_name = map_name
@@ -46,6 +52,13 @@ class BaseSC2Gym(gym.Env):
         self.camera_grid_n = max(2, min(int(camera_grid_n), 32))
         self.camera_cooldown = max(0, int(camera_cooldown))
         self._steps_since_cam = 10**9
+
+        # shaping params
+        self.time_penalty = float(time_penalty)
+        self.kill_bonus = float(kill_bonus)
+        self.own_loss_penalty = float(own_loss_penalty)
+        self.repeat_action_penalty = float(repeat_action_penalty)
+        self.select_army_penalty = float(select_army_penalty)
 
         self.interface_format = features.AgentInterfaceFormat(
             feature_dimensions=features.Dimensions(
@@ -74,11 +87,19 @@ class BaseSC2Gym(gym.Env):
         self._last_ts = None
         self.fn: dict[str, int] = {}
 
-        # players can differ per minigame; default is 1 agent + zerg very_easy bot
+        # default players: 1 terran agent vs very easy zerg bot
         self.players = players or [
             sc2_env.Agent(sc2_env.Race.terran),
             sc2_env.Bot(sc2_env.Race.zerg, sc2_env.Difficulty.very_easy),
         ]
+
+        # shaping state
+        self._prev_enemy_count = None
+        self._prev_own_count = None
+        self._prev_action_type = None
+        self._prev_action_target = None
+
+    # ------------------ lifecycle ------------------
 
     def _launch(self):
         if self._env is not None:
@@ -95,10 +116,10 @@ class BaseSC2Gym(gym.Env):
         )
 
         f = actions.FUNCTIONS
-        # NOTE: select_army removed
-        # NOTE: select_own_unit uses select_point function id
+        # select_own_unit uses select_point's function id
         self.fn = {
             "no_op": f.no_op.id,
+            "select_army": f.select_army.id,          # <-- ADDED
             "select_own_unit": f.select_point.id,
             "select_point": f.select_point.id,
             "select_rect": f.select_rect.id,
@@ -121,9 +142,15 @@ class BaseSC2Gym(gym.Env):
         ts = self._env.reset()[0]
         self._last_ts = ts
         self._steps_since_cam = 10**9
+
+        o = ts.observation
+        self._prev_enemy_count, self._prev_own_count = self._count_units(o.get("feature_units", None))
+        self._prev_action_type = None
+        self._prev_action_target = None
+
         return self._obs_from_ts(ts), {}
 
-    # ---------- obs ----------
+    # ------------------ obs ------------------
 
     def _obs_from_ts(self, ts):
         screen = ts.observation["feature_screen"].astype(np.float32)
@@ -146,6 +173,8 @@ class BaseSC2Gym(gym.Env):
         ys = np.clip(ys, 0, h - 1)
         xs = np.clip(xs, 0, w - 1)
         return x[:, ys[:, None], xs[None, :]]
+
+    # ------------------ coarse targeting helpers ------------------
 
     def _cell_to_xy(self, idx: int, size: int) -> list[int]:
         n = self.grid_n
@@ -184,12 +213,11 @@ class BaseSC2Gym(gym.Env):
         y = int(np.clip(y, 0, self.minimap_size - 1))
         return [x, y]
 
-    # ---------- unit selection helpers ----------
+    # ------------------ unit helpers ------------------
 
     @staticmethod
     def _get_feature_unit_fields(u):
-        """Robustly get (alliance, x, y) from a FeatureUnit-like object."""
-        # preferred: namedtuple attributes
+        # preferred
         try:
             alliance = int(getattr(u, "alliance"))
             x = int(getattr(u, "x"))
@@ -198,36 +226,67 @@ class BaseSC2Gym(gym.Env):
         except Exception:
             pass
 
-        # fallback: tuple indexing (best-effort)
+        # fallback
         try:
             t = tuple(u)
-            # pysc2 FeatureUnit layout usually has:
-            # [0]=unit_type, [1]=alliance, ... and x,y later.
-            # We'll try common placements; if it fails we return None.
             alliance = int(t[1])
-            # try last two as x,y (works in some builds)
             x = int(t[-2])
             y = int(t[-1])
             return alliance, x, y
         except Exception:
             return None
 
-    def _select_own_unit_action(self, target_idx: int, last_ts):
-        """
-        Deterministically select one of our units using target_idx.
-        This makes unit selection learnable for PPO.
+    @classmethod
+    def _count_units(cls, feature_units):
+        if feature_units is None or len(feature_units) == 0:
+            return None, None
 
-        Strategy:
-          - filter feature_units with alliance == 1 (self)
-          - sort by (y, x)
-          - pick k = target_idx % len(units)
-          - select_point on that unit's (x, y)
-        """
+        enemy = 0
+        own = 0
+        for u in feature_units:
+            fields = cls._get_feature_unit_fields(u)
+            if fields is None:
+                continue
+            alliance, _, _ = fields
+            if alliance == 4:
+                enemy += 1
+            elif alliance == 1:
+                own += 1
+        return enemy, own
+
+    @staticmethod
+    def _count_enemy_types(feature_units, type_ids: list[int]) -> int | None:
+        if feature_units is None or len(feature_units) == 0:
+            return None
+        try:
+            arr = np.asarray(feature_units)
+            if arr.ndim == 2 and arr.shape[1] >= 2:
+                unit_type_col = 0
+                alliance_col = 1
+                is_enemy = (arr[:, alliance_col] == 4)
+                is_type = np.zeros(arr.shape[0], dtype=bool)
+                for tid in type_ids:
+                    is_type |= (arr[:, unit_type_col] == tid)
+                return int(np.sum(is_enemy & is_type))
+        except Exception:
+            pass
+
+        cnt = 0
+        for u in feature_units:
+            try:
+                t = int(getattr(u, "unit_type", None))
+                a = int(getattr(u, "alliance", None))
+                if a == 4 and t in type_ids:
+                    cnt += 1
+            except Exception:
+                continue
+        return int(cnt)
+
+    def _select_own_unit_action(self, target_idx: int, last_ts):
         o = last_ts.observation
         f_units = o.get("feature_units", None)
         if f_units is None or len(f_units) == 0:
             return actions.FunctionCall(self.fn["no_op"], [])
-
 
         own = []
         for u in f_units:
@@ -235,8 +294,7 @@ class BaseSC2Gym(gym.Env):
             if fields is None:
                 continue
             alliance, x, y = fields
-            if alliance == 1:  # self
-                # clamp to screen bounds
+            if alliance == 1:
                 x = int(np.clip(x, 0, self.screen_size - 1))
                 y = int(np.clip(y, 0, self.screen_size - 1))
                 own.append((y, x))
@@ -244,15 +302,13 @@ class BaseSC2Gym(gym.Env):
         if not own:
             return actions.FunctionCall(self.fn["no_op"], [])
 
-        own.sort()  # sort by (y, x)
+        own.sort()
         k = int(target_idx) % len(own)
         y, x = own[k]
         xy = [int(x), int(y)]
-
-        # select_point: [[select_type], [x,y]] with select_type 0
         return actions.FunctionCall(self.fn["select_point"], [[0], xy])
 
-    # ---------- action mapping ----------
+    # ------------------ action mapping ------------------
 
     def _make_sc2_action(self, action_type_idx: int, target_idx: int, last_ts):
         avail = set(last_ts.observation.get("available_actions", []))
@@ -266,6 +322,10 @@ class BaseSC2Gym(gym.Env):
 
         if name == "no_op":
             return actions.FunctionCall(fn_id, [])
+
+        if name == "select_army":
+            # [0] = select all (not additive)
+            return actions.FunctionCall(fn_id, [[0]])
 
         if name == "select_own_unit":
             return self._select_own_unit_action(target_idx, last_ts)
@@ -294,7 +354,7 @@ class BaseSC2Gym(gym.Env):
 
         return actions.FunctionCall(self.fn["no_op"], [])
 
-    # ---------- scoring helpers ----------
+    # ------------------ scoring + shaping ------------------
 
     @staticmethod
     def _score_total_from_obs(o: dict) -> int:
@@ -318,24 +378,112 @@ class BaseSC2Gym(gym.Env):
 
         return 0
 
-    @staticmethod
-    def _count_enemy_types(feature_units, type_ids: list[int]) -> int | None:
-        if feature_units is None or len(feature_units) == 0:
-            return None
-        arr = np.asarray(feature_units)
-        if arr.ndim != 2 or arr.shape[1] < 2:
-            return None
+    def _dense_shaping(self, ts, action_type_idx: int, target_idx: int) -> float:
+        shaped = 0.0
 
-        unit_type_col = 0
-        alliance_col = 1
-        is_enemy = (arr[:, alliance_col] == 4)
-        is_type = np.zeros(arr.shape[0], dtype=bool)
-        for tid in type_ids:
-            is_type |= (arr[:, unit_type_col] == tid)
-        return int(np.sum(is_enemy & is_type))
+        # time pressure
+        shaped -= self.time_penalty
+
+        # kill/loss deltas
+        o = ts.observation
+        enemy_now, own_now = self._count_units(o.get("feature_units", None))
+
+        if self._prev_enemy_count is not None and enemy_now is not None:
+            delta_kill = self._prev_enemy_count - enemy_now
+            if delta_kill > 0:
+                shaped += self.kill_bonus * float(delta_kill)
+
+        if self._prev_own_count is not None and own_now is not None:
+            delta_loss = self._prev_own_count - own_now
+            if delta_loss > 0:
+                shaped -= self.own_loss_penalty * float(delta_loss)
+
+        self._prev_enemy_count = enemy_now
+        self._prev_own_count = own_now
+
+        # anti-spam: repeating same action (and same target) gets gently punished
+        if self._prev_action_type is not None and action_type_idx == self._prev_action_type:
+            shaped -= self.repeat_action_penalty
+            if target_idx == self._prev_action_target:
+                shaped -= 0.5 * self.repeat_action_penalty
+
+        # tiny cost to prevent "select_army every step" policies
+        try:
+            i_army = self.action_type_names.index("select_army")
+            if action_type_idx == i_army:
+                shaped -= self.select_army_penalty
+        except Exception:
+            pass
+
+        self._prev_action_type = int(action_type_idx)
+        self._prev_action_target = int(target_idx)
+
+        return shaped
 
     def _info_extra(self, ts, o: dict) -> dict:
         return {}
+
+    # ------------------ MaskablePPO hook ------------------
+
+    def action_masks(self) -> np.ndarray:
+        """
+        MaskablePPO expects this method name exactly: `action_masks`.
+
+        For MultiDiscrete([A, B]) sb3-contrib expects a 1D mask of length A+B,
+        i.e. concatenated categorical masks.
+        """
+        # if env not ready yet, allow everything
+        if self._last_ts is None or not self.fn:
+            a = np.ones(self.num_action_types, dtype=np.int8)
+            b = np.ones(self.grid_n * self.grid_n, dtype=np.int8)
+            return np.concatenate([a, b], axis=0)
+
+        o = self._last_ts.observation
+        avail = set(o.get("available_actions", []))
+
+        # --- action-type mask ---
+        a_mask = np.zeros(self.num_action_types, dtype=np.int8)
+        for i, name in enumerate(self.action_type_names):
+            fn_id = self.fn.get(name, None)
+            if fn_id is None:
+                continue
+            if fn_id in avail:
+                a_mask[i] = 1
+
+        # extra rule: camera cooldown
+        if "move_camera" in self.fn:
+            try:
+                i_cam = self.action_type_names.index("move_camera")
+                if self.camera_cooldown > 0 and self._steps_since_cam < self.camera_cooldown:
+                    a_mask[i_cam] = 0
+            except Exception:
+                pass
+
+        # extra rule: if no own units visible, disable select_own_unit
+        try:
+            i_sel = self.action_type_names.index("select_own_unit")
+            f_units = o.get("feature_units", None)
+            _, own_now = self._count_units(f_units)
+            if own_now is None or own_now <= 0:
+                a_mask[i_sel] = 0
+        except Exception:
+            pass
+
+        # ensure at least no_op is available
+        try:
+            i_noop = self.action_type_names.index("no_op")
+            if int(a_mask.sum()) == 0:
+                a_mask[i_noop] = 1
+        except Exception:
+            pass
+
+        # --- target mask ---
+        # Always allow any target cell; invalid combos are handled by action-type masking above.
+        t_mask = np.ones(self.grid_n * self.grid_n, dtype=np.int8)
+
+        return np.concatenate([a_mask, t_mask], axis=0)
+
+    # ------------------ step ------------------
 
     def step(self, action):
         action_type_idx = int(action[0])
@@ -346,7 +494,11 @@ class BaseSC2Gym(gym.Env):
         self._last_ts = ts
 
         obs = self._obs_from_ts(ts)
-        reward = float(ts.reward) if ts.reward is not None else 0.0
+
+        base_reward = float(ts.reward) if ts.reward is not None else 0.0
+        shaped = self._dense_shaping(ts, action_type_idx, target_idx)
+        reward = base_reward + shaped
+
         terminated = bool(ts.last())
         truncated = False
 
@@ -355,6 +507,8 @@ class BaseSC2Gym(gym.Env):
             "game_loop": int(o.get("game_loop", 0)),
             "available_actions": o.get("available_actions", []),
             "score_total": self._score_total_from_obs(o),
+            "base_reward": base_reward,
+            "shaped_reward": shaped,
         }
         info.update(self._info_extra(ts, o))
-        return obs, reward, terminated, truncated, info
+        return obs, float(reward), terminated, truncated, info

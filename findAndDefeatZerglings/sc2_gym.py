@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pysc2.lib import units
 from common.sc2_base_env import BaseSC2Gym
 
@@ -38,7 +40,6 @@ class FindAndDefeatZerglingsGym(BaseSC2Gym):
         f_units = o.get("feature_units", None)
         left = self._count_enemy_types(f_units, [self.ZERGLING_TYPE_ID])
 
-        # update cumulative kills via left-deltas (monotonic)
         if left is not None:
             left_i = int(left)
             if self._prev_left is None:
@@ -49,7 +50,12 @@ class FindAndDefeatZerglingsGym(BaseSC2Gym):
                     self._killed += int(delta)
                 self._prev_left = left_i
 
+        win = None
+        if ts.last() and left is not None:
+            win = 1 if int(left) == 0 else 0
+
         return {
             "zerglings_left": int(left) if left is not None else None,
             "zerglings_killed": int(self._killed),
+            "win": win,
         }

@@ -30,10 +30,8 @@ class DefeatZerglingsAndBanelingsGym(BaseSC2Gym):
         self.ZERGLING_TYPE_ID = int(units.Zerg.Zergling)
         self.BANELING_TYPE_ID = int(units.Zerg.Baneling)
 
-        # unknown / variable total -> keep as None unless you want to hardcode
         self._objective_total: int | None = None
 
-        # per-episode trackers (computed via "left" deltas)
         self._prev_zerg_left: int | None = None
         self._prev_bane_left: int | None = None
         self._zerg_killed: int = 0
@@ -53,7 +51,6 @@ class DefeatZerglingsAndBanelingsGym(BaseSC2Gym):
         zerg_left = self._count_enemy_types(f_units, [self.ZERGLING_TYPE_ID])
         bane_left = self._count_enemy_types(f_units, [self.BANELING_TYPE_ID])
 
-        # update killed counters via deltas
         if zerg_left is not None:
             z = int(zerg_left)
             if self._prev_zerg_left is not None:
@@ -81,7 +78,6 @@ class DefeatZerglingsAndBanelingsGym(BaseSC2Gym):
             win = 1 if int(objective_left) == 0 else 0
 
         return {
-            # universal
             "objective_left": objective_left,
             "objective_killed": objective_killed,
             "objective_total": self._objective_total,
