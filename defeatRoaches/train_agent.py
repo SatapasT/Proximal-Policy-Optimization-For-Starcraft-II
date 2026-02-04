@@ -103,16 +103,14 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
         env = DefeatRoachesGym(map_name="DefeatRoaches", grid_n=8, step_mul=8, visualize=False)
         env.reset(seed=seed + rank)
 
-        # IMPORTANT: wrap stats BEFORE ActionMasker so stats can access custom fields
+        # IMPORTANT: stats wrapper BEFORE ActionMasker
         env = EpisodeStatsWrapper(
             env,
             num_action_types=len(env.action_type_names),
-            kill_keys=[],
+            kill_keys=["roaches_killed"],  # <- optional redundancy; objective_killed also works now
         )
 
-        # MaskablePPO expects the outer env to be ActionMasker (or expose masks)
         env = ActionMasker(env, get_action_mask)
-
         return env
 
     return _init

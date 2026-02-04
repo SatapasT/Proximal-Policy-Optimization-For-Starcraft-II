@@ -15,6 +15,7 @@ class DefeatZerglingsAndBanelingsGym(BaseSC2Gym):
         visualize: bool = False,
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
+        select_army_penalty: float = 0.01, 
     ):
         super().__init__(
             map_name=map_name,
@@ -25,6 +26,7 @@ class DefeatZerglingsAndBanelingsGym(BaseSC2Gym):
             visualize=visualize,
             camera_grid_n=camera_grid_n,
             camera_cooldown=camera_cooldown,
+            select_army_penalty=select_army_penalty,  
         )
 
         self.ZERGLING_TYPE_ID = int(units.Zerg.Zergling)

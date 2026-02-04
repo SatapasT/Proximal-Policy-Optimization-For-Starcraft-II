@@ -15,6 +15,8 @@ class DefeatRoachesGym(BaseSC2Gym):
         visualize: bool = False,
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
+        # ---- NEW: allow overriding time pressure just for this task ----
+        time_penalty: float = 0.005,  # was 0.001 in BaseSC2Gym default
     ):
         super().__init__(
             map_name=map_name,
@@ -25,18 +27,57 @@ class DefeatRoachesGym(BaseSC2Gym):
             visualize=visualize,
             camera_grid_n=camera_grid_n,
             camera_cooldown=camera_cooldown,
+            # ---- IMPORTANT: only Roaches gets higher time penalty ----
+            time_penalty=time_penalty,
         )
+
         self.ROACH_TYPE_ID = int(units.Zerg.Roach)
+
+        # objective tracking (for EpisodeStatsWrapper universal fields)
+        self._objective_total: int | None = None
+        self._prev_roaches_left: int | None = None
+        self._roaches_killed: int = 0
+
+    def reset(self, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+        self._prev_roaches_left = None
+        self._roaches_killed = 0
+        self._objective_total = None  # optional: could set if you know initial count
+        return obs, info
 
     def _info_extra(self, ts, o: dict) -> dict:
         f_units = o.get("feature_units", None)
+
         roaches_left = self._count_enemy_types(f_units, [self.ROACH_TYPE_ID])
+
+        # update killed counter via delta of "left"
+        if roaches_left is not None:
+            left_i = int(roaches_left)
+
+            if self._prev_roaches_left is None:
+                self._prev_roaches_left = left_i
+                # define objective_total as initial roaches count
+                self._objective_total = left_i
+            else:
+                delta = int(self._prev_roaches_left) - left_i
+                if delta > 0:
+                    self._roaches_killed += int(delta)
+                self._prev_roaches_left = left_i
+
+        objective_left = int(roaches_left) if roaches_left is not None else None
+        objective_killed = int(self._roaches_killed) if roaches_left is not None else None
+        objective_total = int(self._objective_total) if self._objective_total is not None else None
 
         win = None
         if ts.last() and roaches_left is not None:
             win = 1 if int(roaches_left) == 0 else 0
 
         return {
-            "roaches_left": int(roaches_left) if roaches_left is not None else None,
+            "objective_left": objective_left,
+            "objective_killed": objective_killed,
+            "objective_total": objective_total,
             "win": win,
+
+            "roaches_left": objective_left,
+            "roaches_killed": int(self._roaches_killed),
         }

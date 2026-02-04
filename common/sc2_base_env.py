@@ -11,7 +11,7 @@ class BaseSC2Gym(gym.Env):
 
     ACTION_TYPE_NAMES = [
         "no_op",
-        "select_army",          # <-- ADDED
+        "select_army",
         "select_own_unit",
         "select_point",
         "select_rect",
@@ -35,11 +35,12 @@ class BaseSC2Gym(gym.Env):
         camera_cooldown: int = 6,
         players=None,
         # --- shaping knobs (safe defaults) ---
-        time_penalty: float = 0.001,          # per-step penalty to encourage faster completion
-        kill_bonus: float = 0.25,             # per enemy unit removed since last step
-        own_loss_penalty: float = 0.5,        # per own unit removed since last step
-        repeat_action_penalty: float = 0.002, # mild anti-spam
-        select_army_penalty: float = 0.002,   # <-- ADDED: discourage select_army spam (tiny)
+        time_penalty: float = 0.001,           # per-step penalty to encourage faster completion
+        kill_bonus: float = 0.25,              # per enemy unit removed since last step (on-camera feature_units)
+        own_loss_penalty: float = 0.5,         # per own unit removed since last step
+        repeat_action_penalty: float = 0.002,  # mild anti-spam (ONLY for spam-sensitive actions)
+        select_army_penalty: float = 0.002,    # discourage select_army spam (tiny)
+        invalid_action_penalty: float = 0.001, # NEW: penalize "attempted action got turned into no_op"
     ):
         super().__init__()
         self.map_name = map_name
@@ -59,6 +60,7 @@ class BaseSC2Gym(gym.Env):
         self.own_loss_penalty = float(own_loss_penalty)
         self.repeat_action_penalty = float(repeat_action_penalty)
         self.select_army_penalty = float(select_army_penalty)
+        self.invalid_action_penalty = float(invalid_action_penalty)
 
         self.interface_format = features.AgentInterfaceFormat(
             feature_dimensions=features.Dimensions(
@@ -99,6 +101,25 @@ class BaseSC2Gym(gym.Env):
         self._prev_action_type = None
         self._prev_action_target = None
 
+        # IMPORTANT: micro actions should NOT be penalized for repetition
+        self._micro_ok_repeat = {
+            "select_army",
+            "select_own_unit",
+            "select_point",
+            "select_rect",
+            "move_screen",
+            "smart_screen",
+            "attack_screen",
+        }
+
+        # Actions we *do* want to discourage spamming (repeat penalty applies here)
+        self._spam_sensitive = {
+            "no_op",
+            "move_camera",
+            "stop_quick",
+            "holdposition_quick",
+        }
+
     # ------------------ lifecycle ------------------
 
     def _launch(self):
@@ -119,7 +140,7 @@ class BaseSC2Gym(gym.Env):
         # select_own_unit uses select_point's function id
         self.fn = {
             "no_op": f.no_op.id,
-            "select_army": f.select_army.id,          # <-- ADDED
+            "select_army": f.select_army.id,
             "select_own_unit": f.select_point.id,
             "select_point": f.select_point.id,
             "select_rect": f.select_rect.id,
@@ -286,7 +307,7 @@ class BaseSC2Gym(gym.Env):
         o = last_ts.observation
         f_units = o.get("feature_units", None)
         if f_units is None or len(f_units) == 0:
-            return actions.FunctionCall(self.fn["no_op"], [])
+            return actions.FunctionCall(self.fn["no_op"], []), True  # invalid -> no_op
 
         own = []
         for u in f_units:
@@ -300,59 +321,64 @@ class BaseSC2Gym(gym.Env):
                 own.append((y, x))
 
         if not own:
-            return actions.FunctionCall(self.fn["no_op"], [])
+            return actions.FunctionCall(self.fn["no_op"], []), True  # invalid -> no_op
 
         own.sort()
         k = int(target_idx) % len(own)
         y, x = own[k]
         xy = [int(x), int(y)]
-        return actions.FunctionCall(self.fn["select_point"], [[0], xy])
+        return actions.FunctionCall(self.fn["select_point"], [[0], xy]), False
 
     # ------------------ action mapping ------------------
 
     def _make_sc2_action(self, action_type_idx: int, target_idx: int, last_ts):
+        """
+        Returns (sc2_action, invalid_fallback)
+        invalid_fallback=True means: the agent *tried* something but we had to turn it into no_op
+        due to availability/cooldowns/missing units etc.
+        """
         avail = set(last_ts.observation.get("available_actions", []))
         name = self.action_type_names[action_type_idx]
         fn_id = self.fn[name]
 
         self._steps_since_cam += 1
 
+        # unavailable -> forced no_op (invalid)
         if fn_id not in avail:
-            return actions.FunctionCall(self.fn["no_op"], [])
+            return actions.FunctionCall(self.fn["no_op"], []), True
 
         if name == "no_op":
-            return actions.FunctionCall(fn_id, [])
+            return actions.FunctionCall(fn_id, []), False  # explicit no_op (not "invalid fallback")
 
         if name == "select_army":
-            # [0] = select all (not additive)
-            return actions.FunctionCall(fn_id, [[0]])
+            return actions.FunctionCall(fn_id, [[0]]), False
 
         if name == "select_own_unit":
             return self._select_own_unit_action(target_idx, last_ts)
 
         if name in ("stop_quick", "holdposition_quick"):
-            return actions.FunctionCall(fn_id, [[0]])
+            return actions.FunctionCall(fn_id, [[0]]), False
 
         if name == "move_camera":
             if self.camera_cooldown > 0 and self._steps_since_cam < self.camera_cooldown:
-                return actions.FunctionCall(self.fn["no_op"], [])
+                return actions.FunctionCall(self.fn["no_op"], []), True  # cooldown forced no_op
             xy = self._target_to_coarse_minimap_xy(target_idx)
             self._steps_since_cam = 0
-            return actions.FunctionCall(fn_id, [xy])
+            return actions.FunctionCall(fn_id, [xy]), False
 
         xy = self._cell_to_xy(target_idx, self.screen_size)
 
         if name == "select_point":
-            return actions.FunctionCall(fn_id, [[0], xy])
+            return actions.FunctionCall(fn_id, [[0], xy]), False
 
         if name == "select_rect":
             rect = self._rect_around_xy(xy, box_px=12)
-            return actions.FunctionCall(fn_id, [[0], rect[0], rect[1]])
+            return actions.FunctionCall(fn_id, [[0], rect[0], rect[1]]), False
 
         if name in ("move_screen", "smart_screen", "attack_screen"):
-            return actions.FunctionCall(fn_id, [[0], xy])
+            return actions.FunctionCall(fn_id, [[0], xy]), False
 
-        return actions.FunctionCall(self.fn["no_op"], [])
+        return actions.FunctionCall(self.fn["no_op"], []), True
 
     # ------------------ scoring + shaping ------------------
 
@@ -378,13 +404,18 @@ class BaseSC2Gym(gym.Env):
 
         return 0
 
-    def _dense_shaping(self, ts, action_type_idx: int, target_idx: int) -> float:
+    def _dense_shaping(self, ts, action_type_idx: int, target_idx: int, invalid_fallback: bool) -> float:
         shaped = 0.0
 
         # time pressure
         shaped -= self.time_penalty
 
-        # kill/loss deltas
+        # NEW (1): penalize "attempted action got turned into no_op"
+        # This does NOT punish micro; it punishes invalid actions / cooldown violations / unavailable actions.
+        if invalid_fallback:
+            shaped -= self.invalid_action_penalty
+
+        # kill/loss deltas (feature_units is effectively "what's on-camera/visible" -> matches your goal)
         o = ts.observation
         enemy_now, own_now = self._count_units(o.get("feature_units", None))
 
@@ -401,19 +432,19 @@ class BaseSC2Gym(gym.Env):
         self._prev_enemy_count = enemy_now
         self._prev_own_count = own_now
 
-        # anti-spam: repeating same action (and same target) gets gently punished
+        # REPEAT PENALTY:
+        # - DO NOT penalize repeating "micro" actions (move/select/attack)
+        # - ONLY penalize repeating spam-sensitive actions like no_op/camera/stop/hold
         if self._prev_action_type is not None and action_type_idx == self._prev_action_type:
-            shaped -= self.repeat_action_penalty
-            if target_idx == self._prev_action_target:
-                shaped -= 0.5 * self.repeat_action_penalty
+            cur_name = self.action_type_names[action_type_idx]
+            if cur_name in self._spam_sensitive:
+                shaped -= self.repeat_action_penalty
+                if target_idx == self._prev_action_target:
+                    shaped -= 0.5 * self.repeat_action_penalty
 
-        # tiny cost to prevent "select_army every step" policies
-        try:
-            i_army = self.action_type_names.index("select_army")
-            if action_type_idx == i_army:
-                shaped -= self.select_army_penalty
-        except Exception:
-            pass
+        # select_army: allow it, but discourage spamming it every step
+        if self.action_type_names[action_type_idx] == "select_army":
+            shaped -= self.select_army_penalty
 
         self._prev_action_type = int(action_type_idx)
         self._prev_action_target = int(target_idx)
@@ -478,7 +509,6 @@ class BaseSC2Gym(gym.Env):
             pass
 
         # --- target mask ---
-        # Always allow any target cell; invalid combos are handled by action-type masking above.
         t_mask = np.ones(self.grid_n * self.grid_n, dtype=np.int8)
 
         return np.concatenate([a_mask, t_mask], axis=0)
@@ -489,14 +519,14 @@ class BaseSC2Gym(gym.Env):
         action_type_idx = int(action[0])
         target_idx = int(action[1])
 
-        sc2_action = self._make_sc2_action(action_type_idx, target_idx, self._last_ts)
+        sc2_action, invalid_fallback = self._make_sc2_action(action_type_idx, target_idx, self._last_ts)
         ts = self._env.step([sc2_action])[0]
         self._last_ts = ts
 
         obs = self._obs_from_ts(ts)
 
         base_reward = float(ts.reward) if ts.reward is not None else 0.0
-        shaped = self._dense_shaping(ts, action_type_idx, target_idx)
+        shaped = self._dense_shaping(ts, action_type_idx, target_idx, invalid_fallback)
         reward = base_reward + shaped
 
         terminated = bool(ts.last())
@@ -509,6 +539,7 @@ class BaseSC2Gym(gym.Env):
             "score_total": self._score_total_from_obs(o),
             "base_reward": base_reward,
             "shaped_reward": shaped,
+            "invalid_fallback": bool(invalid_fallback),
         }
         info.update(self._info_extra(ts, o))
         return obs, float(reward), terminated, truncated, info
