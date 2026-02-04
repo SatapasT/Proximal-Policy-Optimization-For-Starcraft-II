@@ -3,15 +3,16 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from pysc2.env import sc2_env
-from pysc2.lib import actions, features, units
+from pysc2.lib import actions, features
 
 
 class BaseSC2Gym(gym.Env):
     metadata = {"render_modes": []}
 
+    # NOTE: select_army removed, select_own_unit added
     ACTION_TYPE_NAMES = [
         "no_op",
-        "select_army",
+        "select_own_unit",
         "select_point",
         "select_rect",
         "move_camera",
@@ -79,7 +80,6 @@ class BaseSC2Gym(gym.Env):
             sc2_env.Bot(sc2_env.Race.zerg, sc2_env.Difficulty.very_easy),
         ]
 
-
     def _launch(self):
         if self._env is not None:
             return
@@ -95,9 +95,11 @@ class BaseSC2Gym(gym.Env):
         )
 
         f = actions.FUNCTIONS
+        # NOTE: select_army removed
+        # NOTE: select_own_unit uses select_point function id
         self.fn = {
             "no_op": f.no_op.id,
-            "select_army": f.select_army.id,
+            "select_own_unit": f.select_point.id,
             "select_point": f.select_point.id,
             "select_rect": f.select_rect.id,
             "move_camera": f.move_camera.id,
@@ -145,7 +147,6 @@ class BaseSC2Gym(gym.Env):
         xs = np.clip(xs, 0, w - 1)
         return x[:, ys[:, None], xs[None, :]]
 
-
     def _cell_to_xy(self, idx: int, size: int) -> list[int]:
         n = self.grid_n
         r = idx // n
@@ -183,6 +184,76 @@ class BaseSC2Gym(gym.Env):
         y = int(np.clip(y, 0, self.minimap_size - 1))
         return [x, y]
 
+    # ---------- unit selection helpers ----------
+
+    @staticmethod
+    def _get_feature_unit_fields(u):
+        """Robustly get (alliance, x, y) from a FeatureUnit-like object."""
+        # preferred: namedtuple attributes
+        try:
+            alliance = int(getattr(u, "alliance"))
+            x = int(getattr(u, "x"))
+            y = int(getattr(u, "y"))
+            return alliance, x, y
+        except Exception:
+            pass
+
+        # fallback: tuple indexing (best-effort)
+        try:
+            t = tuple(u)
+            # pysc2 FeatureUnit layout usually has:
+            # [0]=unit_type, [1]=alliance, ... and x,y later.
+            # We'll try common placements; if it fails we return None.
+            alliance = int(t[1])
+            # try last two as x,y (works in some builds)
+            x = int(t[-2])
+            y = int(t[-1])
+            return alliance, x, y
+        except Exception:
+            return None
+
+    def _select_own_unit_action(self, target_idx: int, last_ts):
+        """
+        Deterministically select one of our units using target_idx.
+        This makes unit selection learnable for PPO.
+
+        Strategy:
+          - filter feature_units with alliance == 1 (self)
+          - sort by (y, x)
+          - pick k = target_idx % len(units)
+          - select_point on that unit's (x, y)
+        """
+        o = last_ts.observation
+        f_units = o.get("feature_units", None)
+        if f_units is None or len(f_units) == 0:
+            return actions.FunctionCall(self.fn["no_op"], [])
+
+
+        own = []
+        for u in f_units:
+            fields = self._get_feature_unit_fields(u)
+            if fields is None:
+                continue
+            alliance, x, y = fields
+            if alliance == 1:  # self
+                # clamp to screen bounds
+                x = int(np.clip(x, 0, self.screen_size - 1))
+                y = int(np.clip(y, 0, self.screen_size - 1))
+                own.append((y, x))
+
+        if not own:
+            return actions.FunctionCall(self.fn["no_op"], [])
+
+        own.sort()  # sort by (y, x)
+        k = int(target_idx) % len(own)
+        y, x = own[k]
+        xy = [int(x), int(y)]
+
+        # select_point: [[select_type], [x,y]] with select_type 0
+        return actions.FunctionCall(self.fn["select_point"], [[0], xy])
+
+    # ---------- action mapping ----------
+
     def _make_sc2_action(self, action_type_idx: int, target_idx: int, last_ts):
         avail = set(last_ts.observation.get("available_actions", []))
         name = self.action_type_names[action_type_idx]
@@ -196,8 +267,8 @@ class BaseSC2Gym(gym.Env):
         if name == "no_op":
             return actions.FunctionCall(fn_id, [])
 
-        if name == "select_army":
-            return actions.FunctionCall(fn_id, [[0]])
+        if name == "select_own_unit":
+            return self._select_own_unit_action(target_idx, last_ts)
 
         if name in ("stop_quick", "holdposition_quick"):
             return actions.FunctionCall(fn_id, [[0]])
@@ -223,6 +294,7 @@ class BaseSC2Gym(gym.Env):
 
         return actions.FunctionCall(self.fn["no_op"], [])
 
+    # ---------- scoring helpers ----------
 
     @staticmethod
     def _score_total_from_obs(o: dict) -> int:
@@ -246,7 +318,6 @@ class BaseSC2Gym(gym.Env):
 
         return 0
 
-
     @staticmethod
     def _count_enemy_types(feature_units, type_ids: list[int]) -> int | None:
         if feature_units is None or len(feature_units) == 0:
@@ -256,13 +327,12 @@ class BaseSC2Gym(gym.Env):
             return None
 
         unit_type_col = 0
-        alliance_col = 1  
+        alliance_col = 1
         is_enemy = (arr[:, alliance_col] == 4)
         is_type = np.zeros(arr.shape[0], dtype=bool)
         for tid in type_ids:
             is_type |= (arr[:, unit_type_col] == tid)
         return int(np.sum(is_enemy & is_type))
-
 
     def _info_extra(self, ts, o: dict) -> dict:
         return {}
