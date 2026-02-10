@@ -15,8 +15,11 @@ class DefeatRoachesGym(BaseSC2Gym):
         visualize: bool = False,
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
-        # ---- NEW: allow overriding time pressure just for this task ----
-        time_penalty: float = 0.005,  # was 0.001 in BaseSC2Gym default
+
+        # ---- Roaches-only shaping overrides ----
+        time_penalty: float = 0.01,      # stronger "stop stalling"
+        kill_bonus: float = 1.0,          # was 0.25 in BaseSC2Gym default (big boost)
+        own_loss_penalty: float = 0.25,   # was 0.5 default (slightly softer to avoid fear/stall)
     ):
         super().__init__(
             map_name=map_name,
@@ -27,8 +30,11 @@ class DefeatRoachesGym(BaseSC2Gym):
             visualize=visualize,
             camera_grid_n=camera_grid_n,
             camera_cooldown=camera_cooldown,
-            # ---- IMPORTANT: only Roaches gets higher time penalty ----
+
+            # IMPORTANT: only Roaches gets these changed
             time_penalty=time_penalty,
+            kill_bonus=kill_bonus,
+            own_loss_penalty=own_loss_penalty,
         )
 
         self.ROACH_TYPE_ID = int(units.Zerg.Roach)
@@ -42,12 +48,11 @@ class DefeatRoachesGym(BaseSC2Gym):
         obs, info = super().reset(seed=seed, options=options)
         self._prev_roaches_left = None
         self._roaches_killed = 0
-        self._objective_total = None  # optional: could set if you know initial count
+        self._objective_total = None
         return obs, info
 
     def _info_extra(self, ts, o: dict) -> dict:
         f_units = o.get("feature_units", None)
-
         roaches_left = self._count_enemy_types(f_units, [self.ROACH_TYPE_ID])
 
         # update killed counter via delta of "left"
@@ -56,7 +61,6 @@ class DefeatRoachesGym(BaseSC2Gym):
 
             if self._prev_roaches_left is None:
                 self._prev_roaches_left = left_i
-                # define objective_total as initial roaches count
                 self._objective_total = left_i
             else:
                 delta = int(self._prev_roaches_left) - left_i

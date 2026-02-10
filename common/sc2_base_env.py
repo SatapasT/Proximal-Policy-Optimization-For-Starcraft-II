@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -34,15 +36,19 @@ class BaseSC2Gym(gym.Env):
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
         players=None,
-        # --- shaping knobs (safe defaults) ---
-        time_penalty: float = 0.001,           # per-step penalty to encourage faster completion
-        kill_bonus: float = 0.25,              # per enemy unit removed since last step (on-camera feature_units)
-        own_loss_penalty: float = 0.5,         # per own unit removed since last step
-        repeat_action_penalty: float = 0.002,  # mild anti-spam (ONLY for spam-sensitive actions)
-        select_army_penalty: float = 0.002,    # discourage select_army spam (tiny)
-        invalid_action_penalty: float = 0.001, # NEW: penalize "attempted action got turned into no_op"
+        # --- reward shaping ---
+        time_penalty: float = 0.001, 
+        kill_bonus: float = 0.25,
+        own_loss_penalty: float = 0.5,
+        repeat_action_penalty: float = 0.002,
+        select_army_penalty: float = 0.002,   
+        invalid_action_penalty: float = 0.001,
+        # --- replay saving ---
+        replay_dir: str | None = None,
+        save_replay_episodes: int = 1,
     ):
         super().__init__()
+
         self.map_name = map_name
         self.screen_size = int(screen_size)
         self.minimap_size = int(minimap_size)
@@ -120,6 +126,16 @@ class BaseSC2Gym(gym.Env):
             "holdposition_quick",
         }
 
+        self.save_replay_episodes = int(save_replay_episodes)
+
+        if replay_dir is None:
+            doc = Path(os.environ.get("USERPROFILE", "~")).expanduser() / "Documents"
+            replay_dir = doc / "StarCraft II" / "Replays" / "pysc2"
+        self.replay_dir = str(Path(replay_dir).expanduser().resolve())
+        Path(self.replay_dir).mkdir(parents=True, exist_ok=True)
+
+        
+
     # ------------------ lifecycle ------------------
 
     def _launch(self):
@@ -133,7 +149,8 @@ class BaseSC2Gym(gym.Env):
             step_mul=self.step_mul,
             game_steps_per_episode=0,
             visualize=self.visualize,
-            save_replay_episodes=0,
+            save_replay_episodes=self.save_replay_episodes,
+            replay_dir=self.replay_dir,
         )
 
         f = actions.FUNCTIONS
