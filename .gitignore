@@ -8,11 +8,6 @@ tb_logs/
 events.out.tfevents.*
 **/events.out.tfevents.*
 
-# StarCraft II replays
-sc2_replays/
-**/sc2_replays/
-*.SC2Replay
-
 # PySC2 temp / runtime files
 pysc2_rank*/
 pysc2_*/
