@@ -11,10 +11,6 @@ import gymnasium as gym
 from stable_baselines3.common.callbacks import BaseCallback
 
 
-# -----------------------------
-# EpisodeStatsWrapper (generic)
-# -----------------------------
-
 @dataclass
 class _EpisodeTracker:
     ep_return: float = 0.0
@@ -122,10 +118,6 @@ class EpisodeStatsWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-# ---------------------------------------
-# PrintEpisodeExtrasCallback (generic)
-# ---------------------------------------
-
 class PrintEpisodeExtrasCallback(BaseCallback):
     """
     - JSONL: per-episode rows (type="episode") every episode (or every N)
@@ -145,8 +137,7 @@ class PrintEpisodeExtrasCallback(BaseCallback):
         save_every_episodes: int = 500,
         save_dir: str | Path = "checkpoints",
         verbose: int = 1,
-        # knobs
-        log_episode_json_every: int = 1,   # 1 = every episode
+        log_episode_json_every: int = 1,
         write_summary_json: bool = True,
         print_summary: bool = True,
         win_rate_window: int | None = None,
@@ -189,8 +180,6 @@ class PrintEpisodeExtrasCallback(BaseCallback):
             print(f"[LOG] Summary CSV -> {self.csv_path}")
             print(f"[LOG] JSONL -> {self.jsonl_path}")
 
-    # ---------- file I/O ----------
-
     def _append_csv_row(self, row: str) -> None:
         with self.csv_path.open("a", encoding="utf-8") as f:
             f.write(row + "\n")
@@ -210,8 +199,6 @@ class PrintEpisodeExtrasCallback(BaseCallback):
         with self.csv_path.open("w", encoding="utf-8") as f:
             f.write(meta + "\n")
             f.write(header + "\n")
-
-    # ---------- helpers ----------
 
     @staticmethod
     def _safe(name: str) -> str:
@@ -234,8 +221,6 @@ class PrintEpisodeExtrasCallback(BaseCallback):
         self.model.save(str(out))
         if self.verbose:
             print(f"[CHECKPOINT] saved -> {out}.zip")
-
-    # ---------- main callback ----------
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])

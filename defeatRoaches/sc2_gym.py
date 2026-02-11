@@ -16,7 +16,6 @@ class DefeatRoachesGym(BaseSC2Gym):
         camera_grid_n: int = 4,
         camera_cooldown: int = 6,
 
-        # ---- Roaches-only shaping overrides ----
         time_penalty: float = 0.01,      # stronger "stop stalling"
         kill_bonus: float = 1.0,          # was 0.25 in BaseSC2Gym default (big boost)
         own_loss_penalty: float = 0.25,   # was 0.5 default (slightly softer to avoid fear/stall)
@@ -30,8 +29,6 @@ class DefeatRoachesGym(BaseSC2Gym):
             visualize=visualize,
             camera_grid_n=camera_grid_n,
             camera_cooldown=camera_cooldown,
-
-            # IMPORTANT: only Roaches gets these changed
             time_penalty=time_penalty,
             kill_bonus=kill_bonus,
             own_loss_penalty=own_loss_penalty,
@@ -39,7 +36,6 @@ class DefeatRoachesGym(BaseSC2Gym):
 
         self.ROACH_TYPE_ID = int(units.Zerg.Roach)
 
-        # objective tracking (for EpisodeStatsWrapper universal fields)
         self._objective_total: int | None = None
         self._prev_roaches_left: int | None = None
         self._roaches_killed: int = 0
@@ -55,7 +51,6 @@ class DefeatRoachesGym(BaseSC2Gym):
         f_units = o.get("feature_units", None)
         roaches_left = self._count_enemy_types(f_units, [self.ROACH_TYPE_ID])
 
-        # update killed counter via delta of "left"
         if roaches_left is not None:
             left_i = int(roaches_left)
 

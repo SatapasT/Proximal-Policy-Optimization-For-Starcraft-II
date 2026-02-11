@@ -116,14 +116,12 @@ def make_env_fn(rank: int, seed: int, run_dir: Path):
 
         env.reset(seed=seed + rank)
 
-        # IMPORTANT: stats wrapper BEFORE ActionMasker
         env = EpisodeStatsWrapper(
             env,
             num_action_types=len(env.action_type_names),
             kill_keys=["zerglings_killed"],
         )
 
-        # MaskablePPO expects masks via ActionMasker (or direct action_masks on top wrapper)
         env = ActionMasker(env, get_action_mask)
         return env
 
